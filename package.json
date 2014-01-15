@@ -1,0 +1,4 @@
+{"name": "RedisFs",
+ "version": "0.0.1",
+ "dependencies": {"hiredis": "0.x.x",
+ 			      "redis": "0.x.x"}}
