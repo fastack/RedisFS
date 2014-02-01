@@ -1,14 +1,11 @@
 import redis
 import hashlib
+import json
 
 
-class RedisTree:
+class RedisFileTree:
 
 	def __init__(self, redis_host='localhost', redis_port=6379, redis_db=0):
-
-		# By definition, the root node is always the one with the smallest
-		# value.
-		self.ROOT_NODE = -9223372036854775807
 		
 		self.pool = redis.ConnectionPool(host=redis_host,
 										 port=redis_port,
@@ -19,47 +16,43 @@ class RedisTree:
 		# Assert connection to redis server
 		self.r.ping()
 
-		self.r.flushdb()
-
-
-	# Helper methods
-	# ==============
-
-	def _uid_from_string(self, key):
-		return hashlib.sha1(key).hexdigest()
-
 
 	# Node methods
 	# ============
 
 	def create_node(self, path, attributes):
 
-		uid = self._uid_from_string(path)
-		self.r.hset("NODE:%s" % uid, 'data', attributes)
+		uid = path.rstrip('/')
+
+		self.r.hset("NODE:%s" % uid, 'data', json.dumps(attributes))
 
 		while '/' in path:
 
 			path, child = path.rsplit('/', 1)
 
-			p_uid = self._uid_from_string(path)
+			p_uid = path
 			self.r.hmset("NODE:%s" % uid, {'name': child, 'parent': p_uid})
 
 			self.r.sadd("CHILDREN:%s" % p_uid, uid)
 			uid = p_uid
 
-		self.r.hmset("NODE:%s" % uid, {'name': child, 'parent': None})
+		self.r.hmset("NODE:%s" % uid, {'name': path, 'parent': None})
 
 
 	def delete_node(self, path):
 
-		uid = self._uid_from_string(path)
-		self.r.delete("NODE:%s", % uid)
+		uid = path.rstrip('/')
 
+		p_uid = self.r.hget("NODE:%s" % uid, 'parent')
+		
 		children = self.r.smembers("CHILDREN:%s" % uid)
 		for child in children:
 			name = self.r.hget("NODE:%s" % child, 'name')
 			self.delete_node('/'.join(path, name))
+
 		self.r.delete("CHILDREN:%s" % uid)
+		self.r.delete("NODE:%s" % uid)
+		self.r.srem("CHILDREN:%s" % p_uid, uid)
 
 
 	def move_node(self, orig_path, dest_path):
@@ -70,7 +63,8 @@ class RedisTree:
 
 	def copy_node(self, orig_path, dest_path):
 
-		uid = self._uid_from_string(orig_path)
+		uid = orig_path.rstrip('/')
+
 		content = self.r.hget("NODE:%s" % uid, 'data')
 
 		new_uid = self.create_node(dest_path, content)
@@ -84,15 +78,38 @@ class RedisTree:
 
 	def read_node(self, path):
 
-		uid = self._uid_from_string(path)
+		uid = path.rstrip('/')
 		return self.r.hgetall("NODE:%s" % uid)
 
 
+	# Tree methods
+	# ============
+
+	def delete_tree(self):
+		# TODO: Preserve database, only remove tree
+		self.r.flushdb()
 
 
-fs = RedisTree()
+	def recursively_enumerate_children(self, path):
 
-fs.create_node("/path/to/some/file", {"meta": "data"})
-fs.read("/path/to/some/file")
-fs.move_node("/path/to/some/file", "/path/to/another")
-fs.read("/path/to/another")
+		uid = path.rstrip('/')
+
+		reply = {"path": uid}
+
+		children = self.r.smembers("CHILDREN:%s" % uid)
+
+		if children:
+			reply["children"] = []
+			for child in children:
+				reply["children"].append(self.recursively_enumerate_children(child))
+
+		reply["self"] = self.read_node(uid)
+		yield reply
+
+	def enumerate_children(self, path):
+
+		uid = path.rstrip('/')
+
+		children = self.r.smembers("CHILDREN:%s" % uid)
+		for child in children:
+			yield self.read_node(child)
